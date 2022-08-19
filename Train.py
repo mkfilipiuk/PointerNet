@@ -16,8 +16,8 @@ import numpy as np
 import argparse
 from tqdm import tqdm
 
-from PointerNet import PointerNet
-from Data_Generator import TSPDataset
+from models.PointerNet.PointerNet import PointerNet
+from models.PointerNet.Data_Generator import TSPDataset
 
 parser = argparse.ArgumentParser(description="Pytorch implementation of Pointer-Net")
 
@@ -54,17 +54,16 @@ model = PointerNet(params.embedding_size,
                    params.dropout,
                    params.bidir)
 
-dataset = TSPDataset(params.train_size,
-                     params.nof_points)
+dataset = TSPDataset("data/training/TSP", range(4,11), "EUC_2D")
 
 dataloader = DataLoader(dataset,
                         batch_size=params.batch_size,
-                        shuffle=True,
+                        shuffle=False,
                         num_workers=4)
 
 if USE_CUDA:
     model.cuda()
-    net = torch.nn.DataParallel(model, device_ids=range(torch.cuda.device_count()))
+    net = model #torch.nn.parallel.DistributedDataParallel(model, device_ids=range(torch.cuda.device_count()))
     cudnn.benchmark = True
 
 CCE = torch.nn.CrossEntropyLoss()
@@ -74,6 +73,9 @@ model_optim = optim.Adam(filter(lambda p: p.requires_grad,
 
 losses = []
 
+
+
+
 for epoch in range(params.nof_epoch):
     batch_loss = []
     iterator = tqdm(dataloader, unit='Batch')
@@ -81,13 +83,16 @@ for epoch in range(params.nof_epoch):
     for i_batch, sample_batched in enumerate(iterator):
         iterator.set_description('Batch %i/%i' % (epoch+1, params.nof_epoch))
 
-        train_batch = Variable(sample_batched['Points'])
-        target_batch = Variable(sample_batched['Solution'])
+        train_batch = Variable(sample_batched['data'])
+        target_batch = Variable(sample_batched['length'])
 
         if USE_CUDA:
             train_batch = train_batch.cuda()
             target_batch = target_batch.cuda()
 
+        # print(train_batch.shape)
+        # print(train_batch)
+        # assert False
         o, p = model(train_batch)
         o = o.contiguous().view(-1, o.size()[-1])
 
