@@ -90,14 +90,14 @@ for epoch in range(params.nof_epoch):
             train_batch = train_batch.cuda()
             target_batch = target_batch.cuda()
 
-        # print(train_batch.shape)
-        # print(train_batch)
-        # assert False
+        print(train_batch.shape)
         o, p = model(train_batch)
+        print(o.shape, p.shape)
         o = o.contiguous().view(-1, o.size()[-1])
-
+        print(o.shape)
+        print(target_batch.shape)
         target_batch = target_batch.view(-1)
-
+        print(target_batch.shape)
         loss = CCE(o, target_batch)
 
         losses.append(loss.data[0])

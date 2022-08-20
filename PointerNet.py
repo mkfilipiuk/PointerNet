@@ -102,7 +102,7 @@ class Attention(nn.Module):
         self.softmax = nn.Softmax()
 
         # Initialize vector V
-        nn.init.uniform(self.V, -1, 1)
+        nn.init.uniform_(self.V, -1, 1)
 
     def forward(self, input,
                 context,
@@ -212,17 +212,17 @@ class Decoder(nn.Module):
             gates = self.input_to_hidden(x) + self.hidden_to_hidden(h)
             input, forget, cell, out = gates.chunk(4, 1)
 
-            input = F.sigmoid(input)
-            forget = F.sigmoid(forget)
-            cell = F.tanh(cell)
-            out = F.sigmoid(out)
+            input = torch.sigmoid(input)
+            forget = torch.sigmoid(forget)
+            cell = torch.tanh(cell)
+            out = torch.sigmoid(out)
 
             c_t = (forget * c) + (input * cell)
-            h_t = out * F.tanh(c_t)
+            h_t = out * torch.tanh(c_t)
 
             # Attention section
             hidden_t, output = self.att(h_t, context, torch.eq(mask, 0))
-            hidden_t = F.tanh(self.hidden_out(torch.cat((hidden_t, h_t), 1)))
+            hidden_t = torch.tanh(self.hidden_out(torch.cat((hidden_t, h_t), 1)))
 
             return hidden_t, c_t, output
 
@@ -287,7 +287,7 @@ class PointerNet(nn.Module):
         self.decoder_input0 = Parameter(torch.FloatTensor(embedding_dim), requires_grad=False)
 
         # Initialize decoder_input0
-        nn.init.uniform(self.decoder_input0, -1, 1)
+        nn.init.uniform_(self.decoder_input0, -1, 1)
 
     def forward(self, inputs):
         """
@@ -309,8 +309,8 @@ class PointerNet(nn.Module):
         encoder_outputs, encoder_hidden = self.encoder(embedded_inputs,
                                                        encoder_hidden0)
         if self.bidir:
-            decoder_hidden0 = (torch.cat(encoder_hidden[0][-2:], dim=-1),
-                               torch.cat(encoder_hidden[1][-2:], dim=-1))
+            decoder_hidden0 = (torch.cat(tuple(encoder_hidden[0][-2:]), dim=-1),
+                               torch.cat(tuple(encoder_hidden[1][-2:]), dim=-1))
         else:
             decoder_hidden0 = (encoder_hidden[0][-1],
                                encoder_hidden[1][-1])
