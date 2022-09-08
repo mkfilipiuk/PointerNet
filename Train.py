@@ -151,11 +151,17 @@ def evaluate_model(model, dataset, batch_size, run, mode="validation"):
         for k2, v2 in v.items():
             run[f"results_{mode}/{k}/{k2}"].log(v2)
             eval(f"{k2}_list").append(v2)
-            
+    
+    total_results["averaged"] = {}
+    total_results["averaged"]["loss"] = sum(loss_list)/len(loss_list)
     run[f"results_{mode}/averaged/loss"].log(sum(loss_list)/len(loss_list))
+    total_results["averaged"]["average_optimal_length"] = sum(average_optimal_length_list)/len(average_optimal_length_list)
     run[f"results_{mode}/averaged/average_optimal_length"].log(sum(average_optimal_length_list)/len(average_optimal_length_list))
+    total_results["averaged"]["average_predicted_length"] = sum(average_predicted_length_list)/len(average_predicted_length_list)
     run[f"results_{mode}/averaged/average_predicted_length"].log(sum(average_predicted_length_list)/len(average_predicted_length_list))
+    total_results["averaged"]["average_gap"] = sum(average_gap_list)/len(average_gap_list)
     run[f"results_{mode}/averaged/average_gap"].log(sum(average_gap_list)/len(average_gap_list))
+    total_results["averaged"]["gap_of_averages"] = sum(gap_of_averages_list)/len(gap_of_averages_list)
     run[f"results_{mode}/averaged/gap_of_averages"].log(sum(gap_of_averages_list)/len(gap_of_averages_list))
     return total_results
 
@@ -173,7 +179,7 @@ def train(gpu, params, run):
         validation_dataset = TSPDataset("data/ptrnet_data/test", range(params.train_low,params.train_high), params.metric, params.validation_size, data_source="ptrnet_data", omit_tour_length=True, data_in_ints=False)
     elif params.data_source == "uniform":
         training_dataset = TSPDataset("data/training/TSP", range(params.train_low,params.train_high), params.metric, params.train_size)
-        validation_dataset = TSPDataset("data/validation/TSP", range(4,101), params.metric, params.validation_size)
+        validation_dataset = TSPDataset("data/validation/TSP", range(params.validation_low,params.validation_high), params.metric, params.validation_size)
     test_dataset = TSPDataset("data/test/TSP", [x for x in r if x <= 100], params.metric, params.test_size)
     very_long_test_dataset = TSPDataset("data/test/TSP", [x for x in r if x > 100], params.metric, params.very_long_test_size)
 
@@ -206,13 +212,18 @@ def train(gpu, params, run):
         weight_decay=0.001
     )
 
-    # scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(model_optim, factor=0.5, patience=10, verbose=True)
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(model_optim, factor=0.5, patience=3, verbose=True)
     losses = []
 
     if params.AMP:
         scaler = torch.cuda.amp.GradScaler()
 
 
+    best_gap = 100
+    best_epoch = -1
+    no_improvement_counter = 0
+    run_id = run.get_url().split("/")[-1]
+    tags = "_".join(params.tags)
     for epoch in range(params.nof_epoch):
         batch_loss = []
         iterator = tqdm(training_dataloader, unit='Batch')
@@ -279,29 +290,44 @@ def train(gpu, params, run):
 
 
             iterator.set_postfix(loss='{}'.format(loss.item()))
-
-        summary = evaluate_model(model, validation_dataset, params.validation_batch_size, run)          
-
         iterator.set_postfix(loss=np.average(batch_loss))
-        # scheduler.step(sum([summary[x]["average_gap"] for x in summary]))
+        run[f"results_training/average_loss"].log(np.average(batch_loss))
+        
+        summary = evaluate_model(model, validation_dataset, params.validation_batch_size, run)
+        if summary["averaged"]["average_gap"] < best_gap:
+            best_gap = summary["averaged"]["average_gap"]
+            torch.save(model, f"checkpoints/ptrnet_model_{tags}_{run_id}_best.pt")
+            best_epoch = epoch
+            no_improvement_counter = 0
+        else:
+            no_improvement_counter += 1
+            
+        if no_improvement_counter >= params.early_stopping_epoch:
+            model = torch.load(f"checkpoints/ptrnet_model_{tags}_{run_id}_best.pt")
+            break
+        
+        scheduler.step(sum([summary[x]["average_gap"] for x in summary]))
 
     evaluate_model(model, test_dataset, params.validation_batch_size, run, mode="test")
     evaluate_model(model, very_long_test_dataset, params.very_long_test_batch_size, run, mode="test")
     
-    with open("checkpoints/ptrnet_model_arch.txt", "w") as f: f.write(str(model))
-    torch.save(model, "checkpoints/ptrnet_model.pt")
-    run["model_checkpoints/model_arch"].upload("checkpoints/ptrnet_model_arch.txt")
-    run["model_checkpoints/model"].upload("checkpoints/ptrnet_model.pt")
+    with open(f"checkpoints/ptrnet_model_{tags}_{run_id}_best_arch.txt", "w") as f: f.write(str(model))
+    torch.save(model, f"checkpoints/ptrnet_model_{tags}_{run_id}_best.pt")
+    run["model_checkpoints/model_arch"].upload(f"checkpoints/ptrnet_model_{tags}_{run_id}_best_arch.txt")
+    run["model_checkpoints/model"].upload(f"checkpoints/ptrnet_model_{tags}_{run_id}_best.pt")
+    run["model_checkpoints/best_epoch"].log(best_epoch)
 
 def main():
     parser = argparse.ArgumentParser(description="Pytorch implementation of Pointer-Net")
 
     # Data
-    parser.add_argument('--data_source', default="uniform", type=str, help='Data source')
+    parser.add_argument('--data_source', default="uniform", type=str, help='Data source. Accepted values: uniform, ptrnet_data')
     parser.add_argument('--train_low', default=4, type=int, help='Training data size')
     parser.add_argument('--train_high', default=101, type=int, help='Training data size')
+    parser.add_argument('--validation_low', default=4, type=int, help='Training data size')
+    parser.add_argument('--validation_high', default=101, type=int, help='Training data size')
     parser.add_argument('--train_size', default=100000, type=int, help='Test data size')
-    parser.add_argument('--validation_size', default=10000, type=int, help='Test data size')
+    parser.add_argument('--validation_size', default=1000, type=int, help='Test data size')
     parser.add_argument('--test_size', default=10000, type=int, help='Test data size')
     parser.add_argument('--very_long_test_size', default=1000, type=int, help='Test data size')
     parser.add_argument('--batch_size', default=512, type=int, help='Batch size')
@@ -310,6 +336,7 @@ def main():
     # Train
     parser.add_argument('--nof_epoch', default=100, type=int, help='Number of epochs')
     parser.add_argument('--lr', type=float, default=0.001, help='Learning rate')
+    parser.add_argument('--early_stopping_epoch', type=int, default=5, help='Number of epochs after which the training would stop if there\'s no improvement ')
     # GPU
     parser.add_argument('--gpu_number', default=1, type=int, help='Number of GPUs for training')
     parser.add_argument('--AMP', default=False, action='store_true', help='Use mixed precision training')
@@ -320,7 +347,7 @@ def main():
     parser.add_argument('--embedding_size', type=int, default=128, help='Embedding size')
     parser.add_argument('--hidden', type=int, default=512, help='Number of hidden units')
 
-    parser.add_argument('--tags', type=str, default="", help='Number of hidden units')
+    parser.add_argument('--tags', type=str, default=None, help='Number of hidden units')
     
     params = parser.parse_args()
 
@@ -332,7 +359,13 @@ def main():
         source_files = ['**/*.py']
     )
     run["parameters"] = vars(params)
-    run["sys/tags"].add(params.tags.split(","))
+    if params.tags:
+        params.tags = params.tags.split(",")
+    else:
+        params.tags = []
+    params.tags.extend(["ptrnet", params.data_source, f"train_low={params.train_low}", f"train_high={params.train_high}", f"train_size={params.train_size}"])
+    print(params.tags)
+    run["sys/tags"].add(params.tags)
 
     if params.gpu_number > 0 and torch.cuda.is_available():
         print('Using GPU, %i devices.' % params.gpu_number)
