@@ -11,9 +11,11 @@ class Attention(nn.Module):
     Attention model for Pointer-Net
     """
 
-    def __init__(self, hidden_dim):
+    def __init__(self, hidden_dim, temperature=1, clipping=0):
         super(Attention, self).__init__()
         self.hidden_dim = hidden_dim
+        self.temperature = temperature
+        self.clipping = clipping
 
         self.W1 = nn.Linear(hidden_dim, hidden_dim)
         self.W2 = nn.Linear(hidden_dim, hidden_dim)
@@ -24,10 +26,12 @@ class Attention(nn.Module):
     def forward(self, encoder_outputs, decoder_output, mask):
         vector_of_u = torch.tanh(self.W1(encoder_outputs) + self.W2(decoder_output)) @ self.V
         masked_u = torch.where(mask, vector_of_u, -1e4)
-        return F.softmax(masked_u, dim=1)
+        if self.clipping:
+            return F.softmax(self.clipping*torch.tanh(masked_u), dim=1)
+        return F.softmax(masked_u/self.temperature, dim=1)
 
 class PointerNet(nn.Module):
-    def __init__(self, embedding_dim=128, hidden_dim=512):
+    def __init__(self, embedding_dim=128, hidden_dim=512, sampling=False, glimpse_number=0, temperature=1, clipping=0):
         super(PointerNet, self).__init__()
         # encoder
         lstm_layers = 1
@@ -59,7 +63,11 @@ class PointerNet(nn.Module):
             batch_first=True
         )
         
-        self.attention = Attention(self.hidden_dim)
+        self.sampling = sampling
+        
+        self.glimpses_and_attention = [Attention(self.hidden_dim) for i in range(glimpse_number)]
+        self.attention = Attention(self.hidden_dim, temperature=1, clipping=0)
+        self.glimpses_and_attention.append(self.attention)
 
     def forward(self, inputs, sequence_lengths, max_sequence_length):
         batch_size = sequence_lengths.shape[0]
@@ -101,11 +109,17 @@ class PointerNet(nn.Module):
                 decoder_input_n,
                 decoder_hidden_n
             )
-            
-            input_probabilities_n_1 = self.attention(seq_unpacked, decoder_output_n_1, mask_n)
+            glimpse = decoder_output_n_1
+            for attention in self.glimpses_and_attention[:-1]:
+                glimpse = torch.sum(self.attention(seq_unpacked, glimpse, mask_n).reshape(batch_size, max_sequence_length, 1)*seq_unpacked, dim=1).reshape(batch_size, 1, self.hidden_dim)
+            input_probabilities_n_1 = self.attention(seq_unpacked, glimpse, mask_n)
             outputs.append(input_probabilities_n_1)
         
-            indices = torch.argmax(input_probabilities_n_1, 1)
+            if self.sampling:
+                categorical = torch.distributions.categorical.Categorical(input_probabilities_n_1)
+                indices = categorical.sample()
+            else:
+                indices = torch.argmax(input_probabilities_n_1, 1)
             all_indices.append(indices)
             
             mask_n_1 = mask_n.clone()
@@ -161,9 +175,13 @@ class PointerNet(nn.Module):
                     decoder_hidden_n
                 )
 
+                glimpse = decoder_output_n_1
+                seq_unpacked_expanded = seq_unpacked.reshape(batch_size, 1, max_sequence_length, -1).repeat(1, original_width, 1, 1).reshape(batch_size*original_width, max_sequence_length, -1)
+                for attention in self.glimpses_and_attention[:-1]:
+                    glimpse = torch.sum(self.attention(seq_unpacked_expanded, glimpse, mask_n)*seq_unpacked, dim=-1)
                 input_probabilities_n_1 = self.attention(
-                    seq_unpacked.reshape(batch_size, 1, max_sequence_length, -1).repeat(1, original_width, 1, 1).reshape(batch_size*original_width, max_sequence_length, -1), 
-                    decoder_output_n_1, 
+                    seq_unpacked_expanded, 
+                    glimpse, 
                     mask_n
                 )
                 outputs.append(input_probabilities_n_1.reshape(batch_size, original_width, -1))
@@ -193,7 +211,15 @@ class PointerNet(nn.Module):
                     decoder_input_n,
                     decoder_hidden_n
                 )
-                input_probabilities_n_1 = self.attention(seq_unpacked.reshape(batch_size, 1, max_sequence_length, -1).repeat(1, width, 1, 1).reshape(batch_size*width, max_sequence_length, -1), decoder_output_n_1, mask_n)
+                glimpse = decoder_output_n_1
+                seq_unpacked_expanded = seq_unpacked.reshape(batch_size, 1, max_sequence_length, -1).repeat(1, width, 1, 1).reshape(batch_size*width, max_sequence_length, -1)
+                for attention in self.glimpses_and_attention[:-1]:
+                    glimpse = torch.sum(self.attention(seq_unpacked_expanded, glimpse, mask_n)*seq_unpacked, dim=-1)
+                input_probabilities_n_1 = self.attention(
+                    seq_unpacked_expanded, 
+                    glimpse, 
+                    mask_n
+                )
                 outputs.append(input_probabilities_n_1.reshape(batch_size, -1, 1, max_sequence_length))
                 outputs = torch.cat(outputs, dim=2)
 
